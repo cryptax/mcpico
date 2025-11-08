@@ -21,6 +21,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
+from greetings import banner, pico_greetings
 
 # Configuration file path
 CONFIG_FILE = Path.home() / ".config" / "mcpico" / "config.json"
@@ -531,6 +532,10 @@ class MCPClient:
             console.print(f"[red]HTTP Error: {e}[/red]")
             console.print(f"[red]Response: {e.response.text}[/red]")
             raise
+        except KeyError as e:
+            console.print(f"[red]KeyError accessing response: {e}[/red]")
+            self.debug_log("Full result that caused error", result)
+            raise
         
         # Extract response based on provider type
         if provider_type == "anthropic":
@@ -687,10 +692,10 @@ class MCPClient:
             return response_text
         else:
             # OpenAI format response handling
-            response_text = result["choices"][0]["message"]["content"]
+            message_data = result.get("choices", [{}])[0].get("message", {})
+            response_text = message_data.get("content") or ""  # Handle None or missing content
             
             # Check for tool calls in OpenAI format
-            message_data = result["choices"][0]["message"]
             if "tool_calls" in message_data and message_data["tool_calls"]:
                 # Handle OpenAI-style tool calls
                 for tool_call in message_data["tool_calls"]:
@@ -753,7 +758,7 @@ class MCPClient:
                     
                     # Continue conversation with tool result
                     self.conversation_history.append({"role": "user", "content": user_message})
-                    self.conversation_history.append({"role": "assistant", "content": response_text, "tool_calls": message_data["tool_calls"]})
+                    self.conversation_history.append({"role": "assistant", "content": response_text if response_text else "", "tool_calls": message_data["tool_calls"]})
                     
                     # Add tool result message
                     tool_message = {
@@ -781,17 +786,32 @@ class MCPClient:
                             })
                         follow_up_request["tools"] = openai_tools
                     
+                    self.debug_log("Follow-up request with tool result", follow_up_request)
+                    
                     async with httpx.AsyncClient(timeout=120.0) as client:
                         follow_up_response = await client.post(
                             provider["api_url"],
                             json=follow_up_request,
                             headers=headers
                         )
+                        
+                        if follow_up_response.status_code != 200:
+                            console.print(f"[red]Follow-up API Error {follow_up_response.status_code}:[/red]")
+                            console.print(follow_up_response.text)
+                            return response_text
+                        
                         follow_up_result = follow_up_response.json()
                     
-                    response_text = follow_up_result["choices"][0]["message"]["content"]
+                    self.debug_log("Follow-up response", follow_up_result)
+                    
+                    # Extract response, handling case where content might be null
+                    follow_up_message = follow_up_result["choices"][0]["message"]
+                    response_text = follow_up_message.get("content", "")
+                    
+                    # Update history
+                    self.conversation_history.append({"role": "assistant", "content": response_text if response_text else ""})
                 
-                return response_text
+                return response_text if response_text else "Tool executed successfully."
             
             # Store in simplified format for OpenAI (no tool calls)
             self.conversation_history.append({"role": "user", "content": user_message})
@@ -1023,9 +1043,9 @@ Example: `Locate the main using @/path/to/binary`
         
         console.print("[green]Goodbye![/green]")
 
-
 async def main():
     client = MCPClient()
+    banner()
     await client.run()
 
 
