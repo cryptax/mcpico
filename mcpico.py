@@ -25,7 +25,7 @@ from rich.table import Table
 # Configuration file path
 CONFIG_FILE = Path.home() / ".config" / "mcpico" / "config.json"
 HISTORY_FILE = Path.home() / ".config" / "mcpico" / "history"
-DEBUG_DIR = Path("/tmp/mcp_client_debug")
+DEBUG_DIR = Path("/tmp/mcpico_debug")
 
 console = Console()
 
@@ -76,6 +76,17 @@ class MCPClient:
         self.conversation_history = []
         self.should_exit = False
         self.tool_mapping = {}  # Store tool name mappings
+        self.current_dir = Path.cwd()  # Track current directory
+    
+    def normalize_path(self, path_str: str) -> Path:
+        """Normalize path by expanding ~ and making relative paths absolute"""
+        path = Path(path_str)
+        # Expand ~
+        path = path.expanduser()
+        # Make relative paths absolute based on current directory
+        if not path.is_absolute():
+            path = self.current_dir / path
+        return path.resolve()
         
     def load_config(self) -> Dict:
         """Load configuration from file or create default"""
@@ -309,13 +320,27 @@ class MCPClient:
         conn = self.mcp_connections[server_name]
         process = conn["process"]
         
+        # Normalize any file paths in arguments
+        normalized_args = {}
+        for key, value in arguments.items():
+            if isinstance(value, str) and ("path" in key.lower() or "file" in key.lower()):
+                # Try to normalize as a path
+                try:
+                    normalized_value = str(self.normalize_path(value))
+                    normalized_args[key] = normalized_value
+                    self.debug_log(f"Normalized {key}: {value} -> {normalized_value}")
+                except:
+                    normalized_args[key] = value
+            else:
+                normalized_args[key] = value
+        
         request = {
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
             "params": {
                 "name": tool_name,
-                "arguments": arguments
+                "arguments": normalized_args
             }
         }
         
@@ -422,7 +447,7 @@ class MCPClient:
                 "content-type": "application/json"
             }
         else:
-            # OpenAI-compatible format (LM Studio)
+            # OpenAI-compatible format (LM Studio, Groq, etc.)
             # Convert Anthropic message format to OpenAI format
             openai_messages = []
             for msg in messages:
@@ -440,6 +465,21 @@ class MCPClient:
                 "model": provider["model"],
                 "messages": openai_messages
             }
+            
+            # Add tools in OpenAI format if available
+            if tools:
+                openai_tools = []
+                for tool in tools:
+                    openai_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": tool["name"],
+                            "description": tool["description"],
+                            "parameters": tool["input_schema"]
+                        }
+                    })
+                request_data["tools"] = openai_tools
+            
             headers = {
                 "content-type": "application/json"
             }
@@ -559,6 +599,26 @@ class MCPClient:
                                 block["input"]
                             )
                         
+                        # Display tool result to user
+                        console.print("\n[bold cyan]Tool Result:[/bold cyan]")
+                        if isinstance(tool_result, dict):
+                            # Pretty print structured data
+                            if "content" in tool_result:
+                                result_content = tool_result["content"]
+                                if isinstance(result_content, list):
+                                    for item in result_content:
+                                        if isinstance(item, dict) and "text" in item:
+                                            console.print(Panel(item["text"], border_style="dim cyan"))
+                                        else:
+                                            console.print(Panel(json.dumps(item, indent=2), border_style="dim cyan"))
+                                else:
+                                    console.print(Panel(str(result_content), border_style="dim cyan"))
+                            else:
+                                console.print(Panel(json.dumps(tool_result, indent=2), border_style="dim cyan"))
+                        else:
+                            console.print(Panel(str(tool_result), border_style="dim cyan"))
+                        console.print()
+                        
                         # Add to conversation history if not already added
                         if not self.conversation_history or self.conversation_history[-1]["role"] != "assistant":
                             self.conversation_history.append({"role": "user", "content": content})
@@ -626,9 +686,114 @@ class MCPClient:
             
             return response_text
         else:
-            # OpenAI format
+            # OpenAI format response handling
             response_text = result["choices"][0]["message"]["content"]
-            # Store in simplified format for OpenAI
+            
+            # Check for tool calls in OpenAI format
+            message_data = result["choices"][0]["message"]
+            if "tool_calls" in message_data and message_data["tool_calls"]:
+                # Handle OpenAI-style tool calls
+                for tool_call in message_data["tool_calls"]:
+                    tool_name = tool_call["function"]["name"]
+                    tool_args = json.loads(tool_call["function"]["arguments"])
+                    
+                    if tool_name not in self.tool_mapping:
+                        console.print(f"[red]Tool not found in mapping: {tool_name}[/red]")
+                        continue
+                    
+                    tool_info = self.tool_mapping[tool_name]
+                    server_name = tool_info["server"]
+                    original_tool_name = tool_info["original_name"]
+                    
+                    # Ask user for approval
+                    console.print(Panel(
+                        f"[yellow]Tool:[/yellow] {server_name}::{original_tool_name}\n"
+                        f"[yellow]Arguments:[/yellow]\n{json.dumps(tool_args, indent=2)}",
+                        title="🔧 Tool Call Request",
+                        border_style="yellow"
+                    ))
+                    
+                    approval = input("Approve? [Y/n/edit]: ").strip().lower()
+                    
+                    if approval == 'n':
+                        console.print("[red]Tool call rejected[/red]")
+                        tool_result = {"error": "User rejected tool call"}
+                    elif approval == 'edit':
+                        console.print("[cyan]Enter new arguments (JSON format):[/cyan]")
+                        try:
+                            new_args_str = input("> ")
+                            new_args = json.loads(new_args_str)
+                            console.print(f"[cyan]Calling tool with modified arguments...[/cyan]")
+                            tool_result = await self.call_stdio_tool(server_name, original_tool_name, new_args)
+                        except json.JSONDecodeError:
+                            console.print("[red]Invalid JSON, using original arguments[/red]")
+                            tool_result = await self.call_stdio_tool(server_name, original_tool_name, tool_args)
+                    else:
+                        console.print(f"[green]✓ Executing tool: {server_name}::{original_tool_name}[/green]")
+                        tool_result = await self.call_stdio_tool(server_name, original_tool_name, tool_args)
+                    
+                    # Display tool result to user
+                    console.print("\n[bold cyan]Tool Result:[/bold cyan]")
+                    if isinstance(tool_result, dict):
+                        if "content" in tool_result:
+                            result_content = tool_result["content"]
+                            if isinstance(result_content, list):
+                                for item in result_content:
+                                    if isinstance(item, dict) and "text" in item:
+                                        console.print(Panel(item["text"], border_style="dim cyan"))
+                                    else:
+                                        console.print(Panel(json.dumps(item, indent=2), border_style="dim cyan"))
+                            else:
+                                console.print(Panel(str(result_content), border_style="dim cyan"))
+                        else:
+                            console.print(Panel(json.dumps(tool_result, indent=2), border_style="dim cyan"))
+                    else:
+                        console.print(Panel(str(tool_result), border_style="dim cyan"))
+                    console.print()
+                    
+                    # Continue conversation with tool result
+                    self.conversation_history.append({"role": "user", "content": user_message})
+                    self.conversation_history.append({"role": "assistant", "content": response_text, "tool_calls": message_data["tool_calls"]})
+                    
+                    # Add tool result message
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": json.dumps(tool_result)
+                    }
+                    self.conversation_history.append(tool_message)
+                    
+                    # Make follow-up request
+                    follow_up_request = {
+                        "model": provider["model"],
+                        "messages": self.conversation_history
+                    }
+                    if tools:
+                        openai_tools = []
+                        for tool in tools:
+                            openai_tools.append({
+                                "type": "function",
+                                "function": {
+                                    "name": tool["name"],
+                                    "description": tool["description"],
+                                    "parameters": tool["input_schema"]
+                                }
+                            })
+                        follow_up_request["tools"] = openai_tools
+                    
+                    async with httpx.AsyncClient(timeout=120.0) as client:
+                        follow_up_response = await client.post(
+                            provider["api_url"],
+                            json=follow_up_request,
+                            headers=headers
+                        )
+                        follow_up_result = follow_up_response.json()
+                    
+                    response_text = follow_up_result["choices"][0]["message"]["content"]
+                
+                return response_text
+            
+            # Store in simplified format for OpenAI (no tool calls)
             self.conversation_history.append({"role": "user", "content": user_message})
             self.conversation_history.append({"role": "assistant", "content": response_text})
             return response_text
@@ -763,7 +928,7 @@ Example: `Locate the main using @/path/to/binary`
     async def run(self):
         """Main interactive loop"""
         console.print(Panel.fit(
-            "[bold cyan]MCP Terminal Client[/bold cyan]\n"
+            "[bold cyan]MCPico - MCP Terminal Client[/bold cyan]\n"
             f"Config: {CONFIG_FILE}\n"
             "Type /help for commands",
             border_style="cyan"
@@ -818,7 +983,7 @@ Example: `Locate the main using @/path/to/binary`
                 
                 for match in matches:
                     file_path_str = match.group(1)
-                    file_path = Path(file_path_str)
+                    file_path = self.normalize_path(file_path_str)
                     if file_path.exists():
                         files.append(file_path)
                         console.print(f"[cyan]Attached: {file_path}[/cyan]")
