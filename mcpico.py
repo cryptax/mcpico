@@ -1045,6 +1045,7 @@ Example: `Locate the main using @/path/to/binary`
 
 async def main():
     client = MCPClient()
+    pico_greetings()
     banner()
     await client.run()
 
