@@ -8,20 +8,28 @@ import os
 import sys
 import re
 import asyncio
-import base64
+import copy
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import subprocess
-import httpx
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.table import Table
-from greetings import banner, pico_greetings
+
+# Import provider handlers
+from providers import AnthropicProvider, OpenAIProvider
+
+# Import greetings
+try:
+    from greetings import pico_greetings, banner
+except ImportError:
+    def pico_greetings():
+        pass
+    def banner():
+        pass
 
 # Configuration file path
 CONFIG_FILE = Path.home() / ".config" / "mcpico" / "config.json"
@@ -76,19 +84,17 @@ class MCPClient:
         self.mcp_connections = {}
         self.conversation_history = []
         self.should_exit = False
-        self.tool_mapping = {}  # Store tool name mappings
-        self.current_dir = Path.cwd()  # Track current directory
+        self.tool_mapping = {}
+        self.current_dir = Path.cwd()
     
     def normalize_path(self, path_str: str) -> Path:
         """Normalize path by expanding ~ and making relative paths absolute"""
         path = Path(path_str)
-        # Expand ~
         path = path.expanduser()
-        # Make relative paths absolute based on current directory
         if not path.is_absolute():
             path = self.current_dir / path
         return path.resolve()
-        
+    
     def load_config(self) -> Dict:
         """Load configuration from file or create default"""
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -118,11 +124,8 @@ class MCPClient:
         if self.config.get("debug", False):
             console.print(f"[dim cyan]DEBUG: {message}[/dim cyan]")
             if data:
-                # Make a deep copy to avoid modifying original
-                import copy
                 data_copy = copy.deepcopy(data) if isinstance(data, (dict, list)) else data
                 
-                # Censor API keys
                 def censor_keys(obj):
                     if isinstance(obj, dict):
                         for key, value in obj.items():
@@ -137,7 +140,6 @@ class MCPClient:
                 
                 censor_keys(data_copy)
                 
-                # Shorten tools list if present
                 if isinstance(data_copy, dict):
                     if "body" in data_copy and isinstance(data_copy["body"], dict):
                         if "tools" in data_copy["body"] and isinstance(data_copy["body"]["tools"], list):
@@ -191,7 +193,6 @@ class MCPClient:
         
         try:
             if provider.get("type") == "anthropic":
-                # Anthropic doesn't have a models endpoint, show known models
                 models = [
                     "claude-opus-4-20250514",
                     "claude-sonnet-4-20250514",
@@ -211,15 +212,13 @@ class MCPClient:
                 console.print("[dim]Note: Anthropic API doesn't provide a models list endpoint[/dim]")
             
             elif provider.get("type") == "openai":
-                # Try OpenAI-compatible models endpoint
+                import httpx
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     headers = {}
                     if provider.get("api_key"):
                         headers["Authorization"] = f"Bearer {provider['api_key']}"
                     
-                    # Try to get models list
                     models_url = provider["api_url"].replace("/chat/completions", "/models")
-                    
                     self.debug_log(f"Fetching models from: {models_url}")
                     
                     response = await client.get(models_url, headers=headers)
@@ -261,7 +260,6 @@ class MCPClient:
                 "process": process,
                 "tools": []
             }
-            # Initialize and get tools
             await self.stdio_initialize(server_name)
             console.print(f"[green]Started MCP server: {server_name}[/green]")
         except Exception as e:
@@ -272,7 +270,6 @@ class MCPClient:
         conn = self.mcp_connections[server_name]
         process = conn["process"]
         
-        # Send initialize request
         init_request = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -280,7 +277,7 @@ class MCPClient:
             "params": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "mcp-terminal-client", "version": "1.0.0"}
+                "clientInfo": {"name": "mcpico", "version": "1.0.0"}
             }
         }
         
@@ -289,11 +286,9 @@ class MCPClient:
         process.stdin.write((json.dumps(init_request) + "\n").encode())
         await process.stdin.drain()
         
-        # Read response
         response_line = await process.stdout.readline()
         self.debug_log("MCP initialize response", response_line.decode())
         
-        # Send initialized notification
         initialized = {
             "jsonrpc": "2.0",
             "method": "notifications/initialized"
@@ -301,7 +296,6 @@ class MCPClient:
         process.stdin.write((json.dumps(initialized) + "\n").encode())
         await process.stdin.drain()
         
-        # Get tools list
         tools_request = {
             "jsonrpc": "2.0",
             "id": 2,
@@ -317,23 +311,12 @@ class MCPClient:
             self.debug_log(f"MCP tools loaded for {server_name}", conn["tools"])
     
     async def call_stdio_tool(self, server_name: str, tool_name: str, arguments: Dict) -> Any:
-        """Call a tool on a stdio MCP server"""
+        """Call a tool on a stdio MCP server with path normalization"""
         conn = self.mcp_connections[server_name]
         process = conn["process"]
         
-        # Normalize any file paths in arguments
-        normalized_args = {}
-        for key, value in arguments.items():
-            if isinstance(value, str) and ("path" in key.lower() or "file" in key.lower()):
-                # Try to normalize as a path
-                try:
-                    normalized_value = str(self.normalize_path(value))
-                    normalized_args[key] = normalized_value
-                    self.debug_log(f"Normalized {key}: {value} -> {normalized_value}")
-                except:
-                    normalized_args[key] = value
-            else:
-                normalized_args[key] = value
+        # Normalize any file paths in arguments - this is done centrally
+        normalized_args = self._normalize_tool_arguments(arguments)
         
         request = {
             "jsonrpc": "2.0",
@@ -357,6 +340,21 @@ class MCPClient:
         
         return response.get("result", {})
     
+    def _normalize_tool_arguments(self, arguments: Dict) -> Dict:
+        """Normalize file paths in tool arguments"""
+        normalized_args = {}
+        for key, value in arguments.items():
+            if isinstance(value, str) and ("path" in key.lower() or "file" in key.lower()):
+                try:
+                    normalized_value = str(self.normalize_path(value))
+                    normalized_args[key] = normalized_value
+                    self.debug_log(f"Normalized {key}: {value} -> {normalized_value}")
+                except:
+                    normalized_args[key] = value
+            else:
+                normalized_args[key] = value
+        return normalized_args
+    
     async def initialize_mcp_servers(self):
         """Initialize all configured MCP servers"""
         for server_name, server_config in self.config.get("mcp_servers", {}).items():
@@ -365,23 +363,19 @@ class MCPClient:
                 
             if server_config["type"] == "stdio":
                 await self.start_stdio_server(server_name, server_config)
-            # HTTP servers would be initialized here
     
     def get_available_tools(self) -> List[Dict]:
         """Get all available tools from all MCP servers"""
         tools = []
-        tool_mapping = {}  # Store mapping for later use
+        tool_mapping = {}
         
         for server_name, conn in self.mcp_connections.items():
             for tool in conn.get("tools", []):
-                # Sanitize tool name to match Anthropic requirements: ^[a-zA-Z0-9_-]{1,128}$
                 sanitized_name = f"{server_name}_{tool['name']}"
                 sanitized_name = sanitized_name.replace("::", "_").replace(" ", "_")
-                # Remove any invalid characters
                 sanitized_name = "".join(c for c in sanitized_name if c.isalnum() or c in "_-")
-                sanitized_name = sanitized_name[:128]  # Limit to 128 chars
+                sanitized_name = sanitized_name[:128]
                 
-                # Store only API-compliant fields
                 tool_def = {
                     "name": sanitized_name,
                     "description": tool.get("description", ""),
@@ -389,14 +383,11 @@ class MCPClient:
                 }
                 
                 tools.append(tool_def)
-                
-                # Keep separate mapping for internal use
                 tool_mapping[sanitized_name] = {
                     "original_name": tool['name'],
                     "server": server_name
                 }
         
-        # Store mapping as instance variable for use in send_to_llm
         self.tool_mapping = tool_mapping
         return tools
     
@@ -406,17 +397,13 @@ class MCPClient:
         
         # Build message content
         content = []
-        
-        # Handle file attachments - don't send to Claude, use MCP tools instead
         file_context = ""
         if files:
             for file_path in files:
                 if file_path.exists():
-                    # Add file information to the message context
                     file_context += f"\n[File attached: {file_path}]"
                     console.print(f"[cyan]File attached (for MCP tools): {file_path}[/cyan]")
         
-        # Combine message with file context
         full_message = user_message
         if file_context:
             full_message += file_context
@@ -425,410 +412,81 @@ class MCPClient:
         
         # Build messages with history
         messages = self.conversation_history + [{"role": "user", "content": content}]
-        
-        # Get available MCP tools
         tools = self.get_available_tools()
         
-        # Prepare request based on provider type
         provider_type = provider.get("type", "anthropic")
         
-        if provider_type == "anthropic":
-            # Anthropic format
-            request_data = {
-                "model": provider["model"],
-                "max_tokens": 4096,
-                "messages": messages
-            }
-            if tools:
-                request_data["tools"] = tools
-            
-            headers = {
-                "x-api-key": provider["api_key"],
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            }
-        else:
-            # OpenAI-compatible format (LM Studio, Groq, etc.)
-            # Convert Anthropic message format to OpenAI format
-            openai_messages = []
-            for msg in messages:
-                if isinstance(msg["content"], list):
-                    # Extract text from content blocks
-                    text_parts = [block["text"] for block in msg["content"] if block["type"] == "text"]
-                    openai_messages.append({
-                        "role": msg["role"],
-                        "content": " ".join(text_parts)
-                    })
-                else:
-                    openai_messages.append(msg)
-            
-            request_data = {
-                "model": provider["model"],
-                "messages": openai_messages
-            }
-            
-            # Add tools in OpenAI format if available
-            if tools:
-                openai_tools = []
-                for tool in tools:
-                    openai_tools.append({
-                        "type": "function",
-                        "function": {
-                            "name": tool["name"],
-                            "description": tool["description"],
-                            "parameters": tool["input_schema"]
-                        }
-                    })
-                request_data["tools"] = openai_tools
-            
-            headers = {
-                "content-type": "application/json"
-            }
-            if provider.get("api_key"):
-                headers["Authorization"] = f"Bearer {provider['api_key']}"
-        
-        # Debug output
-        self.debug_log(f"Request to {provider['api_url']}", {
-            "headers": {k: v[:20] + "..." if k.lower() in ["authorization", "x-api-key"] else v 
-                       for k, v in headers.items()},
-            "body": request_data
-        })
-        
-        # Send request
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    provider["api_url"],
-                    json=request_data,
-                    headers=headers
+            if provider_type == "anthropic":
+                result = await AnthropicProvider.send_message(
+                    provider, messages, tools,
+                    debug_callback=self.debug_log,
+                    save_debug_callback=self.save_debug_to_file
                 )
                 
-                # Debug output
-                self.debug_log(f"Response status: {response.status_code}")
+                if "error" in result:
+                    return f"Error: {result['error']}"
                 
-                # Save to file if debug enabled
-                response_data = None
-                try:
-                    response_data = response.json()
-                except:
-                    response_data = response.text
-                
-                self.save_debug_to_file(
-                    {"url": provider["api_url"], "headers": headers, "body": request_data},
-                    response_data,
-                    response.status_code
+                # Handle tool calls
+                response_text, updated_history = await AnthropicProvider.handle_tool_calls(
+                    result, self.tool_mapping, self.call_stdio_tool,
+                    self.conversation_history, provider, tools,
+                    debug_callback=self.debug_log,
+                    save_debug_callback=self.save_debug_to_file
                 )
                 
-                # Debug output on error
-                if response.status_code != 200:
-                    console.print(f"[red]API Error {response.status_code}:[/red]")
-                    console.print(response.text)
-                    return f"Error: {response.status_code} - {response.text}"
-                
-                result = response_data if isinstance(response_data, dict) else response.json()
-                self.debug_log("Response body", result)
-                
-        except httpx.HTTPStatusError as e:
-            console.print(f"[red]HTTP Error: {e}[/red]")
-            console.print(f"[red]Response: {e.response.text}[/red]")
-            raise
-        except KeyError as e:
-            console.print(f"[red]KeyError accessing response: {e}[/red]")
-            self.debug_log("Full result that caused error", result)
-            raise
-        
-        # Extract response based on provider type
-        if provider_type == "anthropic":
-            assistant_message = result
-            response_text = ""
-            
-            # Process tool calls in a loop until no more tool_use blocks
-            while True:
-                has_tool_use = False
-                
-                # Handle tool use
-                for block in assistant_message.get("content", []):
-                    if block["type"] == "text":
-                        response_text += block["text"]
-                    elif block["type"] == "tool_use":
-                        has_tool_use = True
-                        
-                        # Find original tool info from mapping
-                        tool_name = block["name"]
-                        if tool_name not in self.tool_mapping:
-                            console.print(f"[red]Tool not found in mapping: {tool_name}[/red]")
-                            continue
-                        
-                        tool_info = self.tool_mapping[tool_name]
-                        server_name = tool_info["server"]
-                        original_tool_name = tool_info["original_name"]
-                        
-                        # Ask user for approval
-                        console.print(Panel(
-                            f"[yellow]Tool:[/yellow] {server_name}::{original_tool_name}\n"
-                            f"[yellow]Arguments:[/yellow]\n{json.dumps(block['input'], indent=2)}",
-                            title="🔧 Tool Call Request",
-                            border_style="yellow"
-                        ))
-                        
-                        # Get user input for approval
-                        approval = input("Approve? [Y/n/edit]: ").strip().lower()
-                        
-                        if approval == 'n':
-                            console.print("[red]Tool call rejected[/red]")
-                            # Send rejection back to Claude
-                            tool_result = {"error": "User rejected tool call"}
-                        elif approval == 'edit':
-                            console.print("[cyan]Enter new arguments (JSON format):[/cyan]")
-                            try:
-                                new_args_str = input("> ")
-                                new_args = json.loads(new_args_str)
-                                console.print(f"[cyan]Calling tool with modified arguments...[/cyan]")
-                                tool_result = await self.call_stdio_tool(
-                                    server_name, 
-                                    original_tool_name, 
-                                    new_args
-                                )
-                            except json.JSONDecodeError:
-                                console.print("[red]Invalid JSON, using original arguments[/red]")
-                                tool_result = await self.call_stdio_tool(
-                                    server_name, 
-                                    original_tool_name, 
-                                    block["input"]
-                                )
-                        else:  # Default to yes
-                            console.print(f"[green]✓ Executing tool: {server_name}::{original_tool_name}[/green]")
-                            tool_result = await self.call_stdio_tool(
-                                server_name, 
-                                original_tool_name, 
-                                block["input"]
-                            )
-                        
-                        # Display tool result to user
-                        console.print("\n[bold cyan]Tool Result:[/bold cyan]")
-                        if isinstance(tool_result, dict):
-                            # Pretty print structured data
-                            if "content" in tool_result:
-                                result_content = tool_result["content"]
-                                if isinstance(result_content, list):
-                                    for item in result_content:
-                                        if isinstance(item, dict) and "text" in item:
-                                            console.print(Panel(item["text"], border_style="dim cyan"))
-                                        else:
-                                            console.print(Panel(json.dumps(item, indent=2), border_style="dim cyan"))
-                                else:
-                                    console.print(Panel(str(result_content), border_style="dim cyan"))
-                            else:
-                                console.print(Panel(json.dumps(tool_result, indent=2), border_style="dim cyan"))
-                        else:
-                            console.print(Panel(str(tool_result), border_style="dim cyan"))
-                        console.print()
-                        
-                        # Add to conversation history if not already added
-                        if not self.conversation_history or self.conversation_history[-1]["role"] != "assistant":
-                            self.conversation_history.append({"role": "user", "content": content})
-                            self.conversation_history.append({"role": "assistant", "content": assistant_message["content"]})
-                        
-                        # Send tool result back
-                        tool_result_content = [{
-                            "type": "tool_result",
-                            "tool_use_id": block["id"],
-                            "content": json.dumps(tool_result)
-                        }]
-                        
-                        # Continue the conversation with tool result
-                        continue_request = {
-                            "model": provider["model"],
-                            "max_tokens": 4096,
-                            "messages": self.conversation_history + [{"role": "user", "content": tool_result_content}]
-                        }
-                        if tools:
-                            continue_request["tools"] = tools
-                        
-                        self.debug_log("Continuing conversation with tool result", continue_request)
-                        
-                        async with httpx.AsyncClient(timeout=120.0) as client:
-                            continue_response = await client.post(
-                                provider["api_url"],
-                                json=continue_request,
-                                headers=headers
-                            )
-                            
-                            # Save debug info
-                            continue_result_data = continue_response.json()
-                            self.save_debug_to_file(
-                                {"url": provider["api_url"], "headers": headers, "body": continue_request},
-                                continue_result_data,
-                                continue_response.status_code
-                            )
-                            
-                            continue_result = continue_result_data
-                        
-                        self.debug_log("Continue response", continue_result)
-                        
-                        # Update history with tool result and response
-                        self.conversation_history.append({"role": "user", "content": tool_result_content})
-                        self.conversation_history.append({"role": "assistant", "content": continue_result["content"]})
-                        
-                        # Set the assistant_message to the new response to check for more tool calls
-                        assistant_message = continue_result
-                        
-                        # Break out of the for loop to restart checking from the beginning
-                        break
-                
-                # If no tool_use was found, we're done
-                if not has_tool_use:
-                    break
-            
-            # If we haven't added the final message to history yet, do it now
-            if not self.conversation_history or self.conversation_history[-1]["content"] != assistant_message["content"]:
-                if not self.conversation_history or self.conversation_history[-2:] != [
-                    {"role": "user", "content": content},
-                    {"role": "assistant", "content": assistant_message["content"]}
-                ]:
+                # Update conversation history
+                if not updated_history:
                     self.conversation_history.append({"role": "user", "content": content})
-                    self.conversation_history.append({"role": "assistant", "content": assistant_message["content"]})
-            
-            return response_text
-        else:
-            # OpenAI format response handling
-            message_data = result.get("choices", [{}])[0].get("message", {})
-            response_text = message_data.get("content") or ""  # Handle None or missing content
-            
-            # Check for tool calls in OpenAI format
-            if "tool_calls" in message_data and message_data["tool_calls"]:
-                # Handle OpenAI-style tool calls
-                for tool_call in message_data["tool_calls"]:
-                    tool_name = tool_call["function"]["name"]
-                    tool_args = json.loads(tool_call["function"]["arguments"])
-                    
-                    if tool_name not in self.tool_mapping:
-                        console.print(f"[red]Tool not found in mapping: {tool_name}[/red]")
-                        continue
-                    
-                    tool_info = self.tool_mapping[tool_name]
-                    server_name = tool_info["server"]
-                    original_tool_name = tool_info["original_name"]
-                    
-                    # Ask user for approval
-                    console.print(Panel(
-                        f"[yellow]Tool:[/yellow] {server_name}::{original_tool_name}\n"
-                        f"[yellow]Arguments:[/yellow]\n{json.dumps(tool_args, indent=2)}",
-                        title="🔧 Tool Call Request",
-                        border_style="yellow"
-                    ))
-                    
-                    approval = input("Approve? [Y/n/edit]: ").strip().lower()
-                    
-                    if approval == 'n':
-                        console.print("[red]Tool call rejected[/red]")
-                        tool_result = {"error": "User rejected tool call"}
-                    elif approval == 'edit':
-                        console.print("[cyan]Enter new arguments (JSON format):[/cyan]")
-                        try:
-                            new_args_str = input("> ")
-                            new_args = json.loads(new_args_str)
-                            console.print(f"[cyan]Calling tool with modified arguments...[/cyan]")
-                            tool_result = await self.call_stdio_tool(server_name, original_tool_name, new_args)
-                        except json.JSONDecodeError:
-                            console.print("[red]Invalid JSON, using original arguments[/red]")
-                            tool_result = await self.call_stdio_tool(server_name, original_tool_name, tool_args)
-                    else:
-                        console.print(f"[green]✓ Executing tool: {server_name}::{original_tool_name}[/green]")
-                        tool_result = await self.call_stdio_tool(server_name, original_tool_name, tool_args)
-                    
-                    # Display tool result to user
-                    console.print("\n[bold cyan]Tool Result:[/bold cyan]")
-                    if isinstance(tool_result, dict):
-                        if "content" in tool_result:
-                            result_content = tool_result["content"]
-                            if isinstance(result_content, list):
-                                for item in result_content:
-                                    if isinstance(item, dict) and "text" in item:
-                                        console.print(Panel(item["text"], border_style="dim cyan"))
-                                    else:
-                                        console.print(Panel(json.dumps(item, indent=2), border_style="dim cyan"))
-                            else:
-                                console.print(Panel(str(result_content), border_style="dim cyan"))
-                        else:
-                            console.print(Panel(json.dumps(tool_result, indent=2), border_style="dim cyan"))
-                    else:
-                        console.print(Panel(str(tool_result), border_style="dim cyan"))
-                    console.print()
-                    
-                    # Continue conversation with tool result
-                    self.conversation_history.append({"role": "user", "content": user_message})
-                    self.conversation_history.append({"role": "assistant", "content": response_text if response_text else "", "tool_calls": message_data["tool_calls"]})
-                    
-                    # Add tool result message
-                    tool_message = {
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "content": json.dumps(tool_result)
-                    }
-                    self.conversation_history.append(tool_message)
-                    
-                    # Make follow-up request
-                    follow_up_request = {
-                        "model": provider["model"],
-                        "messages": self.conversation_history
-                    }
-                    if tools:
-                        openai_tools = []
-                        for tool in tools:
-                            openai_tools.append({
-                                "type": "function",
-                                "function": {
-                                    "name": tool["name"],
-                                    "description": tool["description"],
-                                    "parameters": tool["input_schema"]
-                                }
-                            })
-                        follow_up_request["tools"] = openai_tools
-                    
-                    self.debug_log("Follow-up request with tool result", follow_up_request)
-                    
-                    async with httpx.AsyncClient(timeout=120.0) as client:
-                        follow_up_response = await client.post(
-                            provider["api_url"],
-                            json=follow_up_request,
-                            headers=headers
-                        )
-                        
-                        if follow_up_response.status_code != 200:
-                            console.print(f"[red]Follow-up API Error {follow_up_response.status_code}:[/red]")
-                            console.print(follow_up_response.text)
-                            return response_text
-                        
-                        follow_up_result = follow_up_response.json()
-                    
-                    self.debug_log("Follow-up response", follow_up_result)
-                    
-                    # Extract response, handling case where content might be null
-                    follow_up_message = follow_up_result["choices"][0]["message"]
-                    response_text = follow_up_message.get("content", "")
-                    
-                    # Update history
-                    self.conversation_history.append({"role": "assistant", "content": response_text if response_text else ""})
+                    self.conversation_history.append({"role": "assistant", "content": result["content"]})
+                else:
+                    self.conversation_history = updated_history
                 
-                return response_text if response_text else "Tool executed successfully."
+                return response_text
             
-            # Store in simplified format for OpenAI (no tool calls)
-            self.conversation_history.append({"role": "user", "content": user_message})
-            self.conversation_history.append({"role": "assistant", "content": response_text})
-            return response_text
+            else:  # OpenAI-compatible
+                result = await OpenAIProvider.send_message(
+                    provider, messages, tools,
+                    debug_callback=self.debug_log,
+                    save_debug_callback=self.save_debug_to_file
+                )
+                
+                if "error" in result:
+                    return f"Error: {result['error']}"
+                
+                # Handle tool calls
+                response_text, updated_history = await OpenAIProvider.handle_tool_calls(
+                    result, self.tool_mapping, self.call_stdio_tool,
+                    self.conversation_history, provider, tools, user_message,
+                    debug_callback=self.debug_log,
+                    save_debug_callback=self.save_debug_to_file
+                )
+                
+                # Update conversation history
+                if not updated_history:
+                    message_data = result.get("choices", [{}])[0].get("message", {})
+                    response_text = message_data.get("content") or ""
+                    self.conversation_history.append({"role": "user", "content": user_message})
+                    self.conversation_history.append({"role": "assistant", "content": response_text})
+                else:
+                    self.conversation_history = updated_history
+                
+                return response_text
+        
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+            if self.config.get("debug", False):
+                import traceback
+                console.print(f"[dim]{traceback.format_exc()}[/dim]")
+            raise
     
     def handle_command(self, command: str) -> bool:
-        """Handle special commands. Returns True if should continue, False if should exit"""
+        """Handle special commands"""
         if command == "/quit" or command == "/exit":
             self.should_exit = True
-            sys.exit(0)  # Immediate exit
+            sys.exit(0)
         
-        elif command == "/clear":
-            self.conversation_history = []
-            console.print("[green]Conversation history cleared[/green]")
-        
-        elif command == "/reset":
+        elif command == "/clear" or command == "/reset":
             self.conversation_history = []
             console.print("[green]Context reset - conversation history cleared[/green]")
         
@@ -850,19 +508,13 @@ class MCPClient:
             
             for name, config in self.config["providers"].items():
                 current = "✓" if name == self.config["current_provider"] else ""
-                table.add_row(
-                    name,
-                    config.get('model', 'N/A'),
-                    config.get('type', 'unknown'),
-                    current
-                )
+                table.add_row(name, config.get('model', 'N/A'), config.get('type', 'unknown'), current)
             
             console.print(table)
         
         elif command.startswith("/use "):
             args = command.split(" ", 1)[1]
             
-            # Check if it's provider:model format
             if ":" in args:
                 provider_name, model_name = args.split(":", 1)
                 if provider_name in self.config["providers"]:
@@ -873,7 +525,6 @@ class MCPClient:
                 else:
                     console.print(f"[red]Unknown provider: {provider_name}[/red]")
             else:
-                # Just provider name
                 provider_name = args
                 if provider_name in self.config["providers"]:
                     self.config["current_provider"] = provider_name
@@ -902,7 +553,6 @@ class MCPClient:
                 
                 for tool in tools:
                     tool_name = tool['name']
-                    # Get original name from mapping if available
                     if tool_name in self.tool_mapping:
                         display_name = f"{self.tool_mapping[tool_name]['server']}::{self.tool_mapping[tool_name]['original_name']}"
                     else:
@@ -931,7 +581,7 @@ class MCPClient:
 **Attaching Files:**
 Type `@` followed by the file path to attach files to your message.
 Example: `@/path/to/file.pdf Summarize this document`
-Example: `Locate the main using @/path/to/binary`
+Example: `Locate the main using @~/binary`
 
 **Examples:**
 - `/use anthropic` - Switch to Anthropic provider
@@ -954,33 +604,26 @@ Example: `Locate the main using @/path/to/binary`
             border_style="cyan"
         ))
         
-        # Initialize MCP servers
         await self.initialize_mcp_servers()
         
-        # Show current provider
         provider = self.get_current_provider()
         console.print(f"[green]Using: {self.config['current_provider']} ({provider['model']})[/green]")
         
-        # Show available tools
         tools = self.get_available_tools()
         if tools:
             console.print(f"[cyan]Loaded {len(tools)} MCP tools[/cyan]")
         
-        # Create prompt session
         HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
         session = PromptSession(history=FileHistory(str(HISTORY_FILE)))
         
         while not self.should_exit:
             try:
-                # Get user input
                 user_input = await session.prompt_async("You: ")
                 
                 if not user_input.strip():
                     continue
                 
-                # Handle commands
                 if user_input.startswith("/"):
-                    # For async commands like /models, we need to await them
                     if user_input.startswith("/models"):
                         parts = user_input.split()
                         provider_name = parts[1] if len(parts) > 1 else None
@@ -988,16 +631,12 @@ Example: `Locate the main using @/path/to/binary`
                     else:
                         should_continue = self.handle_command(user_input)
                         if not should_continue:
-                            # Exit flag was set, break the loop
                             break
                     continue
                 
-                # Parse file attachments - look for @/path/to/file pattern
+                # Parse file attachments
                 files = []
                 message = user_input
-                
-                # Use regex to find @/path patterns (handles spaces in paths if quoted)
-                import re
                 file_pattern = r'@([^\s]+)'
                 matches = re.finditer(file_pattern, user_input)
                 
@@ -1007,19 +646,15 @@ Example: `Locate the main using @/path/to/binary`
                     if file_path.exists():
                         files.append(file_path)
                         console.print(f"[cyan]Attached: {file_path}[/cyan]")
-                        # Remove the @/path from the message
                         message = message.replace(match.group(0), "", 1).strip()
                     else:
                         console.print(f"[yellow]File not found: {file_path}[/yellow]")
                 
-                # Clean up extra spaces
                 message = " ".join(message.split())
                 
-                # Send to LLM
                 console.print("[dim]Thinking...[/dim]")
                 response = await self.send_to_llm(message, files)
                 
-                # Display response
                 console.print("\n[bold cyan]Assistant:[/bold cyan]")
                 console.print(Markdown(response))
                 console.print()
@@ -1034,7 +669,6 @@ Example: `Locate the main using @/path/to/binary`
                     console.print(f"[dim]{traceback.format_exc()}[/dim]")
                 continue
         
-        # Cleanup
         console.print("[yellow]Shutting down...[/yellow]")
         for server_name, conn in self.mcp_connections.items():
             if conn["type"] == "stdio":
@@ -1043,15 +677,16 @@ Example: `Locate the main using @/path/to/binary`
         
         console.print("[green]Goodbye![/green]")
 
+
 async def main():
     client = MCPClient()
-    pico_greetings()
-    banner()
     await client.run()
 
 
 if __name__ == "__main__":
     try:
+        pico_greetings()
+        banner()
         asyncio.run(main())
     except KeyboardInterrupt:
         console.print("\n[yellow]Goodbye![/yellow]")
