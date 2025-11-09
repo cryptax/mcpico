@@ -311,12 +311,9 @@ class MCPClient:
             self.debug_log(f"MCP tools loaded for {server_name}", conn["tools"])
     
     async def call_stdio_tool(self, server_name: str, tool_name: str, arguments: Dict) -> Any:
-        """Call a tool on a stdio MCP server with path normalization"""
+        """Call a tool on a stdio MCP server (arguments already normalized)"""
         conn = self.mcp_connections[server_name]
         process = conn["process"]
-        
-        # Normalize any file paths in arguments - this is done centrally
-        normalized_args = self._normalize_tool_arguments(arguments)
         
         request = {
             "jsonrpc": "2.0",
@@ -324,7 +321,7 @@ class MCPClient:
             "method": "tools/call",
             "params": {
                 "name": tool_name,
-                "arguments": normalized_args
+                "arguments": arguments
             }
         }
         
@@ -431,6 +428,7 @@ class MCPClient:
                 response_text, updated_history = await AnthropicProvider.handle_tool_calls(
                     result, self.tool_mapping, self.call_stdio_tool,
                     self.conversation_history, provider, tools,
+                    path_normalizer=self._normalize_tool_arguments,
                     debug_callback=self.debug_log,
                     save_debug_callback=self.save_debug_to_file
                 )
@@ -458,6 +456,7 @@ class MCPClient:
                 response_text, updated_history = await OpenAIProvider.handle_tool_calls(
                     result, self.tool_mapping, self.call_stdio_tool,
                     self.conversation_history, provider, tools, user_message,
+                    path_normalizer=self._normalize_tool_arguments,
                     debug_callback=self.debug_log,
                     save_debug_callback=self.save_debug_to_file
                 )

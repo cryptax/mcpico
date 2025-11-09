@@ -71,7 +71,8 @@ async def execute_tool_with_approval(
     tool_name: str,
     tool_args: Dict,
     tool_mapping: Dict,
-    tool_executor: Callable
+    tool_executor: Callable,
+    path_normalizer: Callable = None
 ) -> Any:
     """
     Common function to execute a tool with user approval
@@ -84,6 +85,10 @@ async def execute_tool_with_approval(
     tool_info = tool_mapping[tool_name]
     server_name = tool_info["server"]
     original_tool_name = tool_info["original_name"]
+    
+    # Normalize paths if normalizer provided
+    if path_normalizer:
+        tool_args = path_normalizer(tool_args)
     
     # Get approval
     approved, modified_args = ToolApproval.display_and_approve(
@@ -194,6 +199,7 @@ class AnthropicProvider:
         conversation_history: List[Dict],
         provider_config: Dict,
         tools: List[Dict],
+        path_normalizer: Callable = None,
         debug_callback=None,
         save_debug_callback=None
     ) -> tuple[str, List[Dict]]:
@@ -225,7 +231,8 @@ class AnthropicProvider:
                         block["name"],
                         block["input"],
                         tool_mapping,
-                        tool_executor
+                        tool_executor,
+                        path_normalizer
                     )
                     
                     # Update history
@@ -346,6 +353,7 @@ class OpenAIProvider:
         provider_config: Dict,
         tools: List[Dict],
         user_message: str,
+        path_normalizer: Callable = None,
         debug_callback=None,
         save_debug_callback=None
     ) -> tuple[str, List[Dict]]:
@@ -373,7 +381,8 @@ class OpenAIProvider:
                 tool_name,
                 tool_args,
                 tool_mapping,
-                tool_executor
+                tool_executor,
+                path_normalizer
             )
             
             # Update history
