@@ -7,13 +7,11 @@ It supports:
 - File attachment :white_check_mark:
 - MCP servers http based or stdio-based :white_check_mark:
 - Multi-MCP *to test*
-- Anthropic :white_check_mark:
-- Groq :white_check_mark:
-- LM Studio *to test*
+- Anthropic + r2mcp :white_check_mark:
+- Groq + r2mcp: *to test and fix*
+- LM Studio + r2mcp: *to test and fix*
 
 Most of the code has been written by AI... and/but it works pretty well. It has been tested on Linux.
-
-- Nov 8, 2025. This is **alpha** stage. I'll work on it, and improve it in the following days.
 
 ## Installation
 
@@ -49,5 +47,3 @@ View the [asciinema](https://asciinema.org/) videos in the `./demo` directory:
 - `mcpico-use.cast`: how to use McPico and select a given provider/model
 - `mcpico-file.cast`: how to attach a file
 - `mcpico-mcp.cast`: example of MCP use with McPico. McPico is configured to use a [Radare2 MCP](https://github.com/radareorg/radare-mcp), and it locates the main inside a binary.
-
-
