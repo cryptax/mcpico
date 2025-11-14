@@ -1,16 +1,16 @@
 # McPico - MCP client for the terminal
 
-**M**c**P**ico, or **MCP**ico if you prefer, is a lightweight MCP client for the terminal.
+**M**c**P**ico, *or **MCP**ico if you prefer*, is a **lightweight MCP client for the terminal**.
 
 It supports:
 
 - File attachment :white_check_mark:
 - MCP servers stdio-based :white_check_mark:
-- MCP servers http-based: *to test and fix*
+- MCP servers http-based: :bug: :negative_squared_cross_mark:
 - Anthropic + r2mcp :white_check_mark:
 - Groq + r2mcp: :white_check_mark:
 - LM Studio + r2mcp: :white_check_mark:
-- Multi-MCP *to test*
+- Multi-MCP :grey_question: (*to test*)
 
 Most of the code has been written by AI... and/but it works pretty well. It has been tested on Linux.
 
@@ -49,9 +49,16 @@ More info [here](./doc/config.md).
 Then use `/help` for various commands.
 
 ## Demo
-  
-View the [asciinema](https://asciinema.org/) videos in the `./demo` directory, or online.
+
+### Solving a CrackMe with McPico, r2mcp and Anthropic
+
+[![asciicast](https://asciinema.org/a/755841.svg)](https://asciinema.org/a/755841)
+
+
+### Basic use of McPico
 
 [![asciicast](https://asciinema.org/a/QXMTovZacPPSAJsObPZN32Zj8.svg)](https://asciinema.org/a/QXMTovZacPPSAJsObPZN32Zj8)
-[![asciicast](https://asciinema.org/a/755841.svg)](https://asciinema.org/a/755841)
+
+
+
 
