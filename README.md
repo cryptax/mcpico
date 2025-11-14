@@ -9,7 +9,7 @@ It supports:
 - Multi-MCP *to test*
 - Anthropic + r2mcp :white_check_mark:
 - Groq + r2mcp: :white_check_mark:
-- LM Studio + r2mcp: *to test and fix*
+- LM Studio + r2mcp: :white_check_mark:
 
 Most of the code has been written by AI... and/but it works pretty well. It has been tested on Linux.
 

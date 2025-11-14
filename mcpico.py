@@ -59,6 +59,7 @@ DEFAULT_CONFIG = {
             "api_key": "",
             "model": "local-model",
             "api_url": "http://localhost:1234/v1/chat/completions",
+            "models_url": "http://localhost:1234/v1/models",
             "type": "openai"
         }
     },
@@ -218,28 +219,55 @@ class MCPClient:
                     if provider.get("api_key"):
                         headers["Authorization"] = f"Bearer {provider['api_key']}"
                     
-                    models_url = provider["api_url"].replace("/chat/completions", "/models")
+                    # Check if custom models_url is specified in config
+                    if "models_url" in provider:
+                        models_url = provider["models_url"]
+                    else:
+                        # Try to construct models URL from api_url
+                        # Handle different endpoint patterns
+                        api_url = provider["api_url"]
+                        if "/chat/completions" in api_url:
+                            models_url = api_url.replace("/chat/completions", "/models")
+                        elif "/completions" in api_url:
+                            models_url = api_url.replace("/completions", "/models")
+                        else:
+                            # Assume /models is at the same base
+                            from urllib.parse import urljoin
+                            models_url = urljoin(api_url, "/v1/models")
+                    
                     self.debug_log(f"Fetching models from: {models_url}")
                     
-                    response = await client.get(models_url, headers=headers)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        models = data.get("data", [])
+                    try:
+                        response = await client.get(models_url, headers=headers)
                         
-                        table = Table(title=f"{provider_name} Models")
-                        table.add_column("Model ID", style="cyan")
-                        table.add_column("Current", style="green")
-                        
-                        for model in models:
-                            model_id = model.get("id", "unknown")
-                            current = "✓" if model_id == provider["model"] else ""
-                            table.add_row(model_id, current)
-                        
-                        console.print(table)
-                    else:
-                        console.print(f"[yellow]Could not retrieve models (status {response.status_code})[/yellow]")
+                        if response.status_code == 200:
+                            data = response.json()
+                            models = data.get("data", [])
+                            
+                            if not models:
+                                console.print(f"[yellow]No models returned from {models_url}[/yellow]")
+                                console.print(f"[dim]Current model: {provider['model']}[/dim]")
+                                return
+                            
+                            table = Table(title=f"{provider_name} Models")
+                            table.add_column("Model ID", style="cyan")
+                            table.add_column("Current", style="green")
+                            
+                            for model in models:
+                                model_id = model.get("id", "unknown")
+                                current = "✓" if model_id == provider["model"] else ""
+                                table.add_row(model_id, current)
+                            
+                            console.print(table)
+                        else:
+                            console.print(f"[yellow]Could not retrieve models (status {response.status_code})[/yellow]")
+                            console.print(f"[yellow]URL tried: {models_url}[/yellow]")
+                            console.print(f"[dim]Current model: {provider['model']}[/dim]")
+                            console.print(f"[dim]Tip: Add 'models_url' to provider config if endpoint differs[/dim]")
+                    except Exception as e:
+                        console.print(f"[yellow]Could not connect to models endpoint: {e}[/yellow]")
                         console.print(f"[dim]Current model: {provider['model']}[/dim]")
+                        console.print(f"[dim]Tip: Add 'models_url' to provider config if endpoint differs[/dim]")
         
         except Exception as e:
             console.print(f"[red]Error listing models: {e}[/red]")
