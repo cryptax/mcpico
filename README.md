@@ -8,7 +8,7 @@ It supports:
 - MCP servers http based or stdio-based :white_check_mark:
 - Multi-MCP *to test*
 - Anthropic + r2mcp :white_check_mark:
-- Groq + r2mcp: *to test and fix*
+- Groq + r2mcp: :white_check_mark:
 - LM Studio + r2mcp: *to test and fix*
 
 Most of the code has been written by AI... and/but it works pretty well. It has been tested on Linux.
@@ -38,12 +38,19 @@ In `~/.config/mcpico/config.json`, setup your API keys and URLs:
 }
 ```
 
-Get your inspiration from the default configuration in `mcpico.py`
+Get your inspiration from the default configuration in `mcpico.py`.
+More info [here](./doc/config.md).
 
-## Use
+## Run it
+
+`python3 mcpico.py`
+
+Then use `/help` for various commands.
+
+## Demo
   
-View the [asciinema](https://asciinema.org/) videos in the `./demo` directory:
+View the [asciinema](https://asciinema.org/) videos in the `./demo` directory, or online.
 
-- `mcpico-use.cast`: how to use McPico and select a given provider/model
-- `mcpico-file.cast`: how to attach a file
-- `mcpico-mcp.cast`: example of MCP use with McPico. McPico is configured to use a [Radare2 MCP](https://github.com/radareorg/radare-mcp), and it locates the main inside a binary.
+[![asciicast](https://asciinema.org/a/QXMTovZacPPSAJsObPZN32Zj8.svg)](https://asciinema.org/a/QXMTovZacPPSAJsObPZN32Zj8)
+[![asciicast](https://asciinema.org/a/755841.svg)](https://asciinema.org/a/755841)
+

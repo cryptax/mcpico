@@ -358,47 +358,64 @@ class OpenAIProvider:
         save_debug_callback=None
     ) -> tuple[str, List[Dict]]:
         """
-        Handle OpenAI-style tool calls
+        Handle OpenAI-style tool calls in a loop (like Anthropic)
         Returns: (response_text, updated_history)
         """
-        message_data = result.get("choices", [{}])[0].get("message", {})
-        response_text = message_data.get("content") or ""
         updated_history = conversation_history.copy()
-        
-        if "tool_calls" not in message_data or not message_data["tool_calls"]:
-            return response_text, updated_history
+        current_result = result
+        response_text = ""
         
         headers = {"content-type": "application/json"}
         if provider_config.get("api_key"):
             headers["Authorization"] = f"Bearer {provider_config['api_key']}"
         
-        for tool_call in message_data["tool_calls"]:
-            tool_name = tool_call["function"]["name"]
-            tool_args = json.loads(tool_call["function"]["arguments"])
+        # Loop until no more tool calls
+        while True:
+            message_data = current_result.get("choices", [{}])[0].get("message", {})
             
-            # Execute tool with approval (common function)
-            tool_result = await execute_tool_with_approval(
-                tool_name,
-                tool_args,
-                tool_mapping,
-                tool_executor,
-                path_normalizer
-            )
+            # Collect any text response
+            if message_data.get("content"):
+                response_text += message_data["content"]
             
-            # Update history
+            # Check if there are tool calls
+            if "tool_calls" not in message_data or not message_data["tool_calls"]:
+                # No more tool calls, we're done
+                break
+            
+            # Process each tool call in this response
+            tool_results_to_send = []
+            
+            for tool_call in message_data["tool_calls"]:
+                tool_name = tool_call["function"]["name"]
+                tool_args = json.loads(tool_call["function"]["arguments"])
+                
+                # Execute tool with approval (common function)
+                tool_result = await execute_tool_with_approval(
+                    tool_name,
+                    tool_args,
+                    tool_mapping,
+                    tool_executor,
+                    path_normalizer
+                )
+                
+                # Collect tool result for this call
+                tool_results_to_send.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": json.dumps(tool_result)
+                })
+            
+            # Add assistant message with tool calls to history
             updated_history.append({
                 "role": "assistant",
-                "content": response_text if response_text else None,
+                "content": message_data.get("content"),
                 "tool_calls": message_data["tool_calls"]
             })
             
-            updated_history.append({
-                "role": "tool",
-                "tool_call_id": tool_call["id"],
-                "content": json.dumps(tool_result)
-            })
+            # Add all tool results to history
+            updated_history.extend(tool_results_to_send)
             
-            # Make follow-up request
+            # Make follow-up request with tool results
             follow_up_request = {
                 "model": provider_config["model"],
                 "messages": updated_history
@@ -407,7 +424,7 @@ class OpenAIProvider:
                 follow_up_request["tools"] = OpenAIProvider.format_tools(tools)
             
             if debug_callback:
-                debug_callback("Follow-up request with tool result", follow_up_request)
+                debug_callback("Follow-up request with tool results", follow_up_request)
             
             follow_up_result = await send_api_request(
                 provider_config["api_url"],
@@ -418,14 +435,17 @@ class OpenAIProvider:
             )
             
             if "error" in follow_up_result:
-                return response_text, updated_history
+                # Error occurred, return what we have
+                return response_text if response_text else "Error in follow-up request", updated_history
             
-            follow_up_message = follow_up_result.get("choices", [{}])[0].get("message", {})
-            response_text = follow_up_message.get("content") or ""
-            
+            # Update current_result for next iteration
+            current_result = follow_up_result
+        
+        # Add final assistant message (without tool calls)
+        if message_data.get("content"):
             updated_history.append({
                 "role": "assistant",
-                "content": response_text if response_text else None
+                "content": message_data.get("content")
             })
         
         return response_text if response_text else "Tool executed successfully.", updated_history

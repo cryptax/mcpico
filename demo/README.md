@@ -1,0 +1,4 @@
+- `mcpico-use.cast`: how to use McPico and select a given provider/model
+- `mcpico-file.cast`: how to attach a file
+- `mcpico-mcp.cast`: example of MCP use with McPico. McPico is configured to use a [Radare2 MCP](https://github.com/radareorg/radare-mcp), and it locates the main inside a binary.
+- `caviar.cast`: McPico used to solve a CrackMe.
