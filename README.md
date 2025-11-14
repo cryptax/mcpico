@@ -5,11 +5,12 @@
 It supports:
 
 - File attachment :white_check_mark:
-- MCP servers http based or stdio-based :white_check_mark:
-- Multi-MCP *to test*
+- MCP servers stdio-based :white_check_mark:
+- MCP servers http-based: *to test and fix*
 - Anthropic + r2mcp :white_check_mark:
 - Groq + r2mcp: :white_check_mark:
 - LM Studio + r2mcp: :white_check_mark:
+- Multi-MCP *to test*
 
 Most of the code has been written by AI... and/but it works pretty well. It has been tested on Linux.
 

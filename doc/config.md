@@ -1,5 +1,7 @@
 Configuration file: `~/.config/mcpico/config.json`
 
+| Key | Value |
+| --- | ----- |
 | providers | List of providers |
 | mcp_servers | List of MCP servers |
 | debug | Log requests and responses to `/tmp/mcpico` |
@@ -13,7 +15,8 @@ Each provider has an API key, a default model name, a URL, and a type.
 
 Currently, we only support types `openai`, `anthropic`.
 
-
+| Key | Value |
+| --- | ----- |
 | api_key | Paste your API Key here |
 | model   | Default model name to use. Leave blank if you don't know |
 | api_url | URL to contact for chat completions |
@@ -24,7 +27,6 @@ Currently, we only support types `openai`, `anthropic`.
 ## Example for Groq
 
 ```json
-
 {
   "providers": {
     "groq": {
@@ -68,6 +70,15 @@ Currently, we only support types `openai`, `anthropic`.
 
 
 They are listed in `mcp_servers` of the configuration file. We support only 2 types of MCP servers: stdio and http.
+
+| Key | Value |
+| --- | ----- |
+| type | stdio or http |
+| url | only for http MCP servers |
+| command | only for stdio MCP servers |
+| args | array of arguments. Only for stdio MCP servers |
+| enabled | true or false |
+
 
 ## Example for r2mcp
 
