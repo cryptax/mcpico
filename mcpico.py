@@ -276,6 +276,7 @@ class MCPClient:
     async def start_stdio_server(self, server_name: str, server_config: Dict):
         """Start a stdio MCP server"""
         try:
+            self.debug_log(f"Starting stdio MCP server: {server_name}", server_config)
             process = await asyncio.create_subprocess_exec(
                 server_config["command"],
                 *server_config["args"],
@@ -292,6 +293,82 @@ class MCPClient:
             console.print(f"[green]Started MCP server: {server_name}[/green]")
         except Exception as e:
             console.print(f"[red]Failed to start {server_name}: {e}[/red]")
+            self.debug_log(f"Error starting {server_name}", str(e))
+    
+    async def start_http_server(self, server_name: str, server_config: Dict):
+        """Connect to an HTTP/SSE MCP server"""
+        try:
+            import httpx
+            self.debug_log(f"Connecting to HTTP MCP server: {server_name}", server_config)
+            
+            url = server_config["url"]
+            
+            # Initialize the connection
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                init_request = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "mcpico", "version": "1.0.0"}
+                    }
+                }
+                
+                self.debug_log(f"Sending HTTP initialize to {url}", init_request)
+                
+                response = await client.post(url, json=init_request)
+                
+                if response.status_code != 200:
+                    console.print(f"[red]HTTP MCP server {server_name} returned status {response.status_code}[/red]")
+                    self.debug_log(f"HTTP error from {server_name}", response.text)
+                    return
+                
+                init_response = response.json()
+                self.debug_log(f"HTTP initialize response from {server_name}", init_response)
+                
+                # Send initialized notification
+                initialized = {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized"
+                }
+                await client.post(url, json=initialized)
+                
+                # Get tools list
+                tools_request = {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list"
+                }
+                
+                self.debug_log(f"Requesting tools list from {server_name}")
+                
+                tools_response = await client.post(url, json=tools_request)
+                
+                if tools_response.status_code != 200:
+                    console.print(f"[red]Failed to get tools from {server_name}: status {tools_response.status_code}[/red]")
+                    self.debug_log(f"Tools request error from {server_name}", tools_response.text)
+                    return
+                
+                tools_data = tools_response.json()
+                self.debug_log(f"Tools response from {server_name}", tools_data)
+                
+                tools = tools_data.get("result", {}).get("tools", [])
+                
+                self.mcp_connections[server_name] = {
+                    "type": "http",
+                    "url": url,
+                    "tools": tools
+                }
+                
+                console.print(f"[green]Connected to HTTP MCP server: {server_name} ({len(tools)} tools)[/green]")
+                
+        except Exception as e:
+            console.print(f"[red]Failed to connect to HTTP MCP server {server_name}: {e}[/red]")
+            self.debug_log(f"Exception connecting to {server_name}", str(e))
+            import traceback
+            self.debug_log(f"Traceback for {server_name}", traceback.format_exc())
     
     async def stdio_initialize(self, server_name: str):
         """Initialize stdio MCP server and fetch tools"""
@@ -365,6 +442,56 @@ class MCPClient:
         
         return response.get("result", {})
     
+    async def call_http_tool(self, server_name: str, tool_name: str, arguments: Dict) -> Any:
+        """Call a tool on an HTTP MCP server (arguments already normalized)"""
+        import httpx
+        conn = self.mcp_connections[server_name]
+        url = conn["url"]
+        
+        request = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments
+            }
+        }
+        
+        self.debug_log(f"Calling HTTP MCP tool: {server_name}::{tool_name}", request)
+        
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(url, json=request)
+                
+                if response.status_code != 200:
+                    error_msg = f"HTTP error {response.status_code}: {response.text}"
+                    self.debug_log(f"HTTP tool call error", error_msg)
+                    return {"error": error_msg}
+                
+                response_data = response.json()
+                self.debug_log(f"HTTP MCP tool response", response_data)
+                
+                return response_data.get("result", {})
+        except Exception as e:
+            error_msg = f"Exception calling HTTP tool: {e}"
+            self.debug_log(f"HTTP tool call exception", error_msg)
+            return {"error": error_msg}
+    
+    async def call_mcp_tool(self, server_name: str, tool_name: str, arguments: Dict) -> Any:
+        """Call a tool on any MCP server (stdio or http)"""
+        if server_name not in self.mcp_connections:
+            return {"error": f"MCP server {server_name} not connected"}
+        
+        conn = self.mcp_connections[server_name]
+        
+        if conn["type"] == "stdio":
+            return await self.call_stdio_tool(server_name, tool_name, arguments)
+        elif conn["type"] == "http":
+            return await self.call_http_tool(server_name, tool_name, arguments)
+        else:
+            return {"error": f"Unknown MCP server type: {conn['type']}"}
+    
     def _normalize_tool_arguments(self, arguments: Dict) -> Dict:
         """Normalize file paths in tool arguments"""
         normalized_args = {}
@@ -382,12 +509,23 @@ class MCPClient:
     
     async def initialize_mcp_servers(self):
         """Initialize all configured MCP servers"""
+        self.debug_log("Initializing MCP servers", self.config.get("mcp_servers", {}))
+        
         for server_name, server_config in self.config.get("mcp_servers", {}).items():
             if not server_config.get("enabled", True):
+                self.debug_log(f"Skipping disabled MCP server: {server_name}")
                 continue
-                
-            if server_config["type"] == "stdio":
+            
+            server_type = server_config.get("type")
+            self.debug_log(f"Initializing MCP server: {server_name} (type: {server_type})")
+            
+            if server_type == "stdio":
                 await self.start_stdio_server(server_name, server_config)
+            elif server_type == "http":
+                await self.start_http_server(server_name, server_config)
+            else:
+                console.print(f"[yellow]Unknown MCP server type '{server_type}' for {server_name}[/yellow]")
+                self.debug_log(f"Unknown server type for {server_name}", server_config)
     
     def get_available_tools(self) -> List[Dict]:
         """Get all available tools from all MCP servers"""
@@ -454,7 +592,7 @@ class MCPClient:
                 
                 # Handle tool calls
                 response_text, updated_history = await AnthropicProvider.handle_tool_calls(
-                    result, self.tool_mapping, self.call_stdio_tool,
+                    result, self.tool_mapping, self.call_mcp_tool,
                     self.conversation_history, provider, tools,
                     path_normalizer=self._normalize_tool_arguments,
                     debug_callback=self.debug_log,
@@ -482,7 +620,7 @@ class MCPClient:
                 
                 # Handle tool calls
                 response_text, updated_history = await OpenAIProvider.handle_tool_calls(
-                    result, self.tool_mapping, self.call_stdio_tool,
+                    result, self.tool_mapping, self.call_mcp_tool,
                     self.conversation_history, provider, tools, user_message,
                     path_normalizer=self._normalize_tool_arguments,
                     debug_callback=self.debug_log,
