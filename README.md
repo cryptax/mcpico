@@ -4,9 +4,9 @@
 
 It supports:
 
-- File attachment :white_check_mark:
+- File attachment :bug:
 - MCP servers stdio-based :white_check_mark:
-- MCP servers http-based: :bug: :negative_squared_cross_mark:
+- MCP servers http-based: :bug:
 - Anthropic + r2mcp :white_check_mark:
 - Groq + r2mcp: :white_check_mark:
 - LM Studio + r2mcp: :white_check_mark:
