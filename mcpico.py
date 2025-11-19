@@ -299,12 +299,46 @@ class MCPClient:
         """Connect to an HTTP/SSE MCP server"""
         try:
             import httpx
-            self.debug_log(f"Connecting to HTTP MCP server: {server_name}", server_config)
+            self.debug_log(f"Connecting to HTTP/SSE MCP server: {server_name}", server_config)
             
             url = server_config["url"]
             
-            # Initialize the connection
+            # For SSE, we need to establish a persistent connection
+            # SSE servers typically expect GET with headers, not POST with JSON
+            
+            # Try SSE-style connection first (GET with Accept: text/event-stream)
+            headers = {
+                "Accept": "text/event-stream",
+                "Cache-Control": "no-cache",
+            }
+            
+            self.debug_log(f"Attempting SSE connection to {url}")
+            
+            # For SSE MCP servers, we need a different approach
+            # Let's try the endpoint message format
             async with httpx.AsyncClient(timeout=30.0) as client:
+                # First, try to get server info via GET
+                try:
+                    response = await client.get(url, headers=headers, follow_redirects=True)
+                    self.debug_log(f"SSE GET response status: {response.status_code}")
+                    self.debug_log(f"SSE GET response headers", dict(response.headers))
+                except Exception as e:
+                    self.debug_log(f"SSE GET failed, trying POST endpoint", str(e))
+                
+                # Try the message endpoint if it exists
+                # Many SSE MCP implementations have /message or /messages endpoint for POST
+                message_url = url.replace("/sse", "/message")
+                if message_url == url:
+                    # Try common patterns
+                    base_url = url.rstrip("/")
+                    possible_endpoints = [
+                        f"{base_url}/message",
+                        f"{base_url}/messages",
+                        url,  # Original URL
+                    ]
+                else:
+                    possible_endpoints = [message_url, url]
+                
                 init_request = {
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -316,24 +350,42 @@ class MCPClient:
                     }
                 }
                 
-                self.debug_log(f"Sending HTTP initialize to {url}", init_request)
+                connected = False
+                working_endpoint = None
                 
-                response = await client.post(url, json=init_request)
+                for endpoint in possible_endpoints:
+                    try:
+                        self.debug_log(f"Trying endpoint: {endpoint}", init_request)
+                        response = await client.post(
+                            endpoint, 
+                            json=init_request,
+                            headers={"Content-Type": "application/json"}
+                        )
+                        
+                        if response.status_code == 200:
+                            working_endpoint = endpoint
+                            connected = True
+                            init_response = response.json()
+                            self.debug_log(f"HTTP initialize response from {server_name}", init_response)
+                            break
+                        else:
+                            self.debug_log(f"Endpoint {endpoint} returned {response.status_code}: {response.text[:200]}")
+                    except Exception as e:
+                        self.debug_log(f"Endpoint {endpoint} failed", str(e))
+                        continue
                 
-                if response.status_code != 200:
-                    console.print(f"[red]HTTP MCP server {server_name} returned status {response.status_code}[/red]")
-                    self.debug_log(f"HTTP error from {server_name}", response.text)
+                if not connected:
+                    console.print(f"[red]Could not find working endpoint for {server_name}[/red]")
+                    console.print(f"[yellow]Tried: {', '.join(possible_endpoints)}[/yellow]")
+                    console.print(f"[yellow]Hint: Make sure your MCP server supports HTTP POST with JSON-RPC[/yellow]")
                     return
-                
-                init_response = response.json()
-                self.debug_log(f"HTTP initialize response from {server_name}", init_response)
                 
                 # Send initialized notification
                 initialized = {
                     "jsonrpc": "2.0",
                     "method": "notifications/initialized"
                 }
-                await client.post(url, json=initialized)
+                await client.post(working_endpoint, json=initialized)
                 
                 # Get tools list
                 tools_request = {
@@ -344,7 +396,7 @@ class MCPClient:
                 
                 self.debug_log(f"Requesting tools list from {server_name}")
                 
-                tools_response = await client.post(url, json=tools_request)
+                tools_response = await client.post(working_endpoint, json=tools_request)
                 
                 if tools_response.status_code != 200:
                     console.print(f"[red]Failed to get tools from {server_name}: status {tools_response.status_code}[/red]")
@@ -358,7 +410,7 @@ class MCPClient:
                 
                 self.mcp_connections[server_name] = {
                     "type": "http",
-                    "url": url,
+                    "url": working_endpoint,
                     "tools": tools
                 }
                 
@@ -507,6 +559,28 @@ class MCPClient:
                 normalized_args[key] = value
         return normalized_args
     
+    async def reconnect_server(self, server_name: str):
+        """Reconnect to an MCP server"""
+        # Remove from connections if present
+        if server_name in self.mcp_connections:
+            conn = self.mcp_connections[server_name]
+            if conn["type"] == "stdio":
+                conn["process"].terminate()
+                await conn["process"].wait()
+            del self.mcp_connections[server_name]
+        
+        # Reconnect
+        server_config = self.config["mcp_servers"][server_name]
+        if server_config["type"] == "stdio":
+            await self.start_stdio_server(server_name, server_config)
+        elif server_config["type"] == "http":
+            await self.start_http_server(server_name, server_config)
+        
+        # Refresh tools
+        tools = self.get_available_tools()
+        console.print(f"[green]Reconnected to {server_name} ({len(tools)} total tools)[/green]")
+    
+    
     async def initialize_mcp_servers(self):
         """Initialize all configured MCP servers"""
         self.debug_log("Initializing MCP servers", self.config.get("mcp_servers", {}))
@@ -645,8 +719,8 @@ class MCPClient:
                 console.print(f"[dim]{traceback.format_exc()}[/dim]")
             raise
     
-    def handle_command(self, command: str) -> bool:
-        """Handle special commands"""
+    def handle_command(self, command: str) -> bool | tuple:
+        """Handle special commands. Returns True to continue, False to exit, or tuple for async actions"""
         if command == "/quit" or command == "/exit":
             self.should_exit = True
             sys.exit(0)
@@ -728,6 +802,64 @@ class MCPClient:
             else:
                 console.print("[yellow]No MCP tools available[/yellow]")
         
+        elif command == "/mcp":
+            table = Table(title="MCP Servers")
+            table.add_column("Name", style="cyan")
+            table.add_column("Type", style="yellow")
+            table.add_column("Status", style="green")
+            table.add_column("Tools", style="magenta")
+            
+            for server_name, server_config in self.config.get("mcp_servers", {}).items():
+                server_type = server_config.get("type", "unknown")
+                enabled = server_config.get("enabled", True)
+                
+                if server_name in self.mcp_connections:
+                    status = "✓ Connected"
+                    tool_count = str(len(self.mcp_connections[server_name].get("tools", [])))
+                elif enabled:
+                    status = "✗ Failed"
+                    tool_count = "-"
+                else:
+                    status = "○ Disabled"
+                    tool_count = "-"
+                
+                table.add_row(server_name, server_type, status, tool_count)
+            
+            console.print(table)
+        
+        elif command.startswith("/enable "):
+            server_name = command.split(" ", 1)[1]
+            if server_name in self.config.get("mcp_servers", {}):
+                self.config["mcp_servers"][server_name]["enabled"] = True
+                self.save_config()
+                console.print(f"[green]Enabled MCP server: {server_name}[/green]")
+                console.print("[yellow]Restart mcpico or reconnect to activate[/yellow]")
+            else:
+                console.print(f"[red]Unknown MCP server: {server_name}[/red]")
+        
+        elif command.startswith("/disable "):
+            server_name = command.split(" ", 1)[1]
+            if server_name in self.config.get("mcp_servers", {}):
+                self.config["mcp_servers"][server_name]["enabled"] = False
+                self.save_config()
+                console.print(f"[yellow]Disabled MCP server: {server_name}[/yellow]")
+                console.print("[dim]Will take effect on next restart[/dim]")
+            else:
+                console.print(f"[red]Unknown MCP server: {server_name}[/red]")
+        
+        elif command.startswith("/reconnect"):
+            parts = command.split()
+            if len(parts) > 1:
+                server_name = parts[1]
+                if server_name in self.config.get("mcp_servers", {}):
+                    console.print(f"[yellow]Reconnecting to {server_name}...[/yellow]")
+                    # Store the server name for async processing
+                    return ("reconnect", server_name)
+                else:
+                    console.print(f"[red]Unknown MCP server: {server_name}[/red]")
+            else:
+                console.print("[yellow]Usage: /reconnect <server_name>[/yellow]")
+        
         elif command == "/help":
             help_text = """
 **Available Commands:**
@@ -740,6 +872,10 @@ class MCPClient:
 - `/model <model>` - Change model for current provider
 - `/models [provider]` - List available models for current or specified provider
 - `/tools` - List available MCP tools
+- `/mcp` - List MCP servers and their status
+- `/enable <server>` - Enable an MCP server
+- `/disable <server>` - Disable an MCP server
+- `/reconnect <server>` - Reconnect to an MCP server
 - `/debug` - Toggle debug mode (shows HTTP requests/responses)
 - `/help` - Show this help message
 
@@ -752,6 +888,8 @@ Example: `Locate the main using @~/binary`
 - `/use anthropic` - Switch to Anthropic provider
 - `/use groq:llama-3.3-70b-versatile` - Switch to Groq with specific model
 - `/model claude-opus-4-20250514` - Change to Opus model on current provider
+- `/mcp` - See all configured MCP servers
+- `/reconnect ghidramcp` - Try to reconnect to ghidramcp server
             """
             console.print(Panel(Markdown(help_text), title="Help"))
         
@@ -794,9 +932,12 @@ Example: `Locate the main using @~/binary`
                         provider_name = parts[1] if len(parts) > 1 else None
                         await self.list_models(provider_name)
                     else:
-                        should_continue = self.handle_command(user_input)
-                        if not should_continue:
+                        result = self.handle_command(user_input)
+                        if result is False:
                             break
+                        elif isinstance(result, tuple) and result[0] == "reconnect":
+                            # Handle async reconnect
+                            await self.reconnect_server(result[1])
                     continue
                 
                 # Parse file attachments
