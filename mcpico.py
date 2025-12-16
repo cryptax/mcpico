@@ -18,6 +18,8 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
+import mcp_stdio
+import mcp_http
 
 # Import provider handlers
 from providers import AnthropicProvider, OpenAIProvider
@@ -274,261 +276,24 @@ class MCPClient:
             console.print(f"[dim]Current model: {provider['model']}[/dim]")
     
     async def start_stdio_server(self, server_name: str, server_config: Dict):
-        """Start a stdio MCP server"""
-        try:
-            self.debug_log(f"Starting stdio MCP server: {server_name}", server_config)
-            process = await asyncio.create_subprocess_exec(
-                server_config["command"],
-                *server_config["args"],
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            self.mcp_connections[server_name] = {
-                "type": "stdio",
-                "process": process,
-                "tools": []
-            }
-            await self.stdio_initialize(server_name)
-            console.print(f"[green]Started MCP server: {server_name}[/green]")
-        except Exception as e:
-            console.print(f"[red]Failed to start {server_name}: {e}[/red]")
-            self.debug_log(f"Error starting {server_name}", str(e))
+        """Thin wrapper to start a stdio MCP server (delegates to mcp_stdio)."""
+        return await mcp_stdio.start_stdio_server(self, server_name, server_config)
     
     async def start_http_server(self, server_name: str, server_config: Dict):
-        """Connect to an HTTP/SSE MCP server"""
-        try:
-            import httpx
-            self.debug_log(f"Connecting to HTTP/SSE MCP server: {server_name}", server_config)
-            
-            url = server_config["url"]
-            
-            # For SSE, we need to establish a persistent connection
-            # SSE servers typically expect GET with headers, not POST with JSON
-            
-            # Try SSE-style connection first (GET with Accept: text/event-stream)
-            headers = {
-                "Accept": "text/event-stream",
-                "Cache-Control": "no-cache",
-            }
-            
-            self.debug_log(f"Attempting SSE connection to {url}")
-            
-            # For SSE MCP servers, we need a different approach
-            # Let's try the endpoint message format
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                # First, try to get server info via GET
-                try:
-                    response = await client.get(url, headers=headers, follow_redirects=True)
-                    self.debug_log(f"SSE GET response status: {response.status_code}")
-                    self.debug_log(f"SSE GET response headers", dict(response.headers))
-                except Exception as e:
-                    self.debug_log(f"SSE GET failed, trying POST endpoint", str(e))
-                
-                # Try the message endpoint if it exists
-                # Many SSE MCP implementations have /message or /messages endpoint for POST
-                message_url = url.replace("/sse", "/message")
-                if message_url == url:
-                    # Try common patterns
-                    base_url = url.rstrip("/")
-                    possible_endpoints = [
-                        f"{base_url}/message",
-                        f"{base_url}/messages",
-                        url,  # Original URL
-                    ]
-                else:
-                    possible_endpoints = [message_url, url]
-                
-                init_request = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {"name": "mcpico", "version": "1.0.0"}
-                    }
-                }
-                
-                connected = False
-                working_endpoint = None
-                
-                for endpoint in possible_endpoints:
-                    try:
-                        self.debug_log(f"Trying endpoint: {endpoint}", init_request)
-                        response = await client.post(
-                            endpoint, 
-                            json=init_request,
-                            headers={"Content-Type": "application/json"}
-                        )
-                        
-                        if response.status_code == 200:
-                            working_endpoint = endpoint
-                            connected = True
-                            init_response = response.json()
-                            self.debug_log(f"HTTP initialize response from {server_name}", init_response)
-                            break
-                        else:
-                            self.debug_log(f"Endpoint {endpoint} returned {response.status_code}: {response.text[:200]}")
-                    except Exception as e:
-                        self.debug_log(f"Endpoint {endpoint} failed", str(e))
-                        continue
-                
-                if not connected:
-                    console.print(f"[red]Could not find working endpoint for {server_name}[/red]")
-                    console.print(f"[yellow]Tried: {', '.join(possible_endpoints)}[/yellow]")
-                    console.print(f"[yellow]Hint: Make sure your MCP server supports HTTP POST with JSON-RPC[/yellow]")
-                    return
-                
-                # Send initialized notification
-                initialized = {
-                    "jsonrpc": "2.0",
-                    "method": "notifications/initialized"
-                }
-                await client.post(working_endpoint, json=initialized)
-                
-                # Get tools list
-                tools_request = {
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/list"
-                }
-                
-                self.debug_log(f"Requesting tools list from {server_name}")
-                
-                tools_response = await client.post(working_endpoint, json=tools_request)
-                
-                if tools_response.status_code != 200:
-                    console.print(f"[red]Failed to get tools from {server_name}: status {tools_response.status_code}[/red]")
-                    self.debug_log(f"Tools request error from {server_name}", tools_response.text)
-                    return
-                
-                tools_data = tools_response.json()
-                self.debug_log(f"Tools response from {server_name}", tools_data)
-                
-                tools = tools_data.get("result", {}).get("tools", [])
-                
-                self.mcp_connections[server_name] = {
-                    "type": "http",
-                    "url": working_endpoint,
-                    "tools": tools
-                }
-                
-                console.print(f"[green]Connected to HTTP MCP server: {server_name} ({len(tools)} tools)[/green]")
-                
-        except Exception as e:
-            console.print(f"[red]Failed to connect to HTTP MCP server {server_name}: {e}[/red]")
-            self.debug_log(f"Exception connecting to {server_name}", str(e))
-            import traceback
-            self.debug_log(f"Traceback for {server_name}", traceback.format_exc())
+        """Thin wrapper to start/connect to an HTTP/SSE MCP server (delegates to mcp_http)."""
+        return await mcp_http.start_http_server(self, server_name, server_config)
     
     async def stdio_initialize(self, server_name: str):
-        """Initialize stdio MCP server and fetch tools"""
-        conn = self.mcp_connections[server_name]
-        process = conn["process"]
-        
-        init_request = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "mcpico", "version": "1.0.0"}
-            }
-        }
-        
-        self.debug_log("Sending MCP initialize", init_request)
-        
-        process.stdin.write((json.dumps(init_request) + "\n").encode())
-        await process.stdin.drain()
-        
-        response_line = await process.stdout.readline()
-        self.debug_log("MCP initialize response", response_line.decode())
-        
-        initialized = {
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized"
-        }
-        process.stdin.write((json.dumps(initialized) + "\n").encode())
-        await process.stdin.drain()
-        
-        tools_request = {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list"
-        }
-        process.stdin.write((json.dumps(tools_request) + "\n").encode())
-        await process.stdin.drain()
-        
-        tools_response = await process.stdout.readline()
-        if tools_response:
-            tools_data = json.loads(tools_response)
-            conn["tools"] = tools_data.get("result", {}).get("tools", [])
-            self.debug_log(f"MCP tools loaded for {server_name}", conn["tools"])
+        """Thin wrapper to initialize stdio MCP server (delegates to mcp_stdio)."""
+        return await mcp_stdio.stdio_initialize(self, server_name)
     
     async def call_stdio_tool(self, server_name: str, tool_name: str, arguments: Dict) -> Any:
-        """Call a tool on a stdio MCP server (arguments already normalized)"""
-        conn = self.mcp_connections[server_name]
-        process = conn["process"]
-        
-        request = {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments
-            }
-        }
-        
-        self.debug_log(f"Calling MCP tool: {server_name}::{tool_name}", request)
-        
-        process.stdin.write((json.dumps(request) + "\n").encode())
-        await process.stdin.drain()
-        
-        response_line = await process.stdout.readline()
-        response = json.loads(response_line)
-        
-        self.debug_log(f"MCP tool response", response)
-        
-        return response.get("result", {})
+        """Thin wrapper to call stdio MCP tool (delegates to mcp_stdio)."""
+        return await mcp_stdio.call_stdio_tool(self, server_name, tool_name, arguments)
     
     async def call_http_tool(self, server_name: str, tool_name: str, arguments: Dict) -> Any:
-        """Call a tool on an HTTP MCP server (arguments already normalized)"""
-        import httpx
-        conn = self.mcp_connections[server_name]
-        url = conn["url"]
-        
-        request = {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments
-            }
-        }
-        
-        self.debug_log(f"Calling HTTP MCP tool: {server_name}::{tool_name}", request)
-        
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(url, json=request)
-                
-                if response.status_code != 200:
-                    error_msg = f"HTTP error {response.status_code}: {response.text}"
-                    self.debug_log(f"HTTP tool call error", error_msg)
-                    return {"error": error_msg}
-                
-                response_data = response.json()
-                self.debug_log(f"HTTP MCP tool response", response_data)
-                
-                return response_data.get("result", {})
-        except Exception as e:
-            error_msg = f"Exception calling HTTP tool: {e}"
-            self.debug_log(f"HTTP tool call exception", error_msg)
-            return {"error": error_msg}
+        """Thin wrapper to call HTTP MCP tool (delegates to mcp_http)."""
+        return await mcp_http.call_http_tool(self, server_name, tool_name, arguments)
     
     async def call_mcp_tool(self, server_name: str, tool_name: str, arguments: Dict) -> Any:
         """Call a tool on any MCP server (stdio or http)"""

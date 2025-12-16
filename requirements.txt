@@ -1,3 +1,5 @@
 prompt-toolkit
 rich
 httpx
+pytest
+pytest-asyncio
