@@ -33,11 +33,28 @@ async def start_http_server(client, server_name: str, server_config: dict):
 
             connected = False
             working_endpoint = None
+            chosen_accept = "application/json"
 
             for endpoint in possible_endpoints:
                 try:
                     client.debug_log(f"Trying endpoint: {endpoint}", init_request)
+                    # First try without special Accept header to keep compatibility with simple clients/tests
                     response = await client_http.post(endpoint, json=init_request)
+
+                    # If server rejects Accept (406), retry with explicit Accept negotiation
+                    if response.status_code == 406:
+                        client.debug_log(f"Endpoint {endpoint} returned 406, negotiating Accept header")
+                        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+                        response = await client_http.post(endpoint, json=init_request, headers=headers)
+
+                        if response.status_code == 406:
+                            client.debug_log(f"Endpoint {endpoint} still 406, trying application/stream+json")
+                            headers["Accept"] = "application/stream+json"
+                            response = await client_http.post(endpoint, json=init_request, headers=headers)
+
+                        if response.status_code == 200:
+                            chosen_accept = headers.get("Accept", "application/json")
+
                     if response.status_code == 200:
                         working_endpoint = endpoint
                         init_response = response.json()
@@ -54,13 +71,21 @@ async def start_http_server(client, server_name: str, server_config: dict):
                 console.print(f"[red]Could not find working endpoint for {server_name}[/red]")
                 return
 
+            async def post_with_optional_headers(client_http_obj, endpoint_url, payload, hdrs):
+                try:
+                    return await client_http_obj.post(endpoint_url, json=payload, headers=hdrs)
+                except TypeError:
+                    # Some test fakes or simple clients don't accept headers kwarg
+                    return await client_http_obj.post(endpoint_url, json=payload)
+
             # Send initialized notification
             initialized = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-            await client_http.post(working_endpoint, json=initialized)
+            hdrs = {"Accept": chosen_accept, "Content-Type": "application/json"}
+            await post_with_optional_headers(client_http, working_endpoint, initialized, hdrs)
 
             # Request tools list
             tools_request = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
-            tools_response = await client_http.post(working_endpoint, json=tools_request)
+            tools_response = await post_with_optional_headers(client_http, working_endpoint, tools_request, hdrs)
 
             if tools_response.status_code != 200:
                 console.print(f"[red]Failed to get tools from {server_name}: status {tools_response.status_code}[/red]")
@@ -72,7 +97,7 @@ async def start_http_server(client, server_name: str, server_config: dict):
 
             tools = tools_data.get("result", {}).get("tools", [])
 
-            client.mcp_connections[server_name] = {"type": "http", "url": working_endpoint, "tools": tools}
+            client.mcp_connections[server_name] = {"type": "http", "url": working_endpoint, "tools": tools, "accept": chosen_accept}
 
             console.print(f"[green]Connected to HTTP MCP server: {server_name} ({len(tools)} tools)[/green]")
 
@@ -97,8 +122,16 @@ async def call_http_tool(client, server_name: str, tool_name: str, arguments: di
 
         client.debug_log(f"Calling HTTP MCP tool: {server_name}::{tool_name}", request)
 
+        # Use the same Accept header chosen during initialization (fallback to application/json)
+        accept_header = conn.get("accept", "application/json")
+        headers = {"Content-Type": "application/json", "Accept": accept_header}
+
         async with httpx.AsyncClient(timeout=120.0) as client_http:
-            response = await client_http.post(url, json=request)
+            try:
+                response = await client_http.post(url, json=request, headers=headers)
+            except TypeError:
+                # Fallback for clients that don't accept headers kwarg
+                response = await client_http.post(url, json=request)
 
             if response.status_code != 200:
                 error_msg = f"HTTP error {response.status_code}: {response.text}"
